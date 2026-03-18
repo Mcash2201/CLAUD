@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+agent.log
+activity_log.json
+agent_memory.json
