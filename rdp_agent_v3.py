@@ -14,34 +14,14 @@ A Telegram-controlled local machine automation agent that:
 Setup:
   1. pip install -r requirements.txt
   2. python3 -m playwright install chromium
-  3. Set TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, ANTHROPIC_API_KEY below
+  3. Create .env file with credentials (see .env.example)
   4. python3 rdp_agent_v3.py
 
 Requirements: Python 3.10+, see requirements.txt
 """
 
 # ─────────────────────────────────────────────────────────────
-# SECTION 2: Configuration
-# ─────────────────────────────────────────────────────────────
-
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "YOUR_CHAT_ID")
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "YOUR_ANTHROPIC_API_KEY")
-
-MAX_TASK_STEPS = 20
-HEADLESS_BROWSER = False
-TYPING_MIN = 0.04
-TYPING_MAX = 0.13
-MOUSE_MIN = 0.25
-MOUSE_MAX = 0.75
-POLL_INTERVAL = 1
-LOG_FILE = "agent.log"
-ACTIVITY_LOG_FILE = "activity_log.json"
-MEMORY_FILE = "agent_memory.json"
-TEMPLATES_DIR = "templates"
-
-# ─────────────────────────────────────────────────────────────
-# SECTION 3: Imports
+# SECTION 2: Imports (must come before config)
 # ─────────────────────────────────────────────────────────────
 
 import asyncio
@@ -63,6 +43,44 @@ from pathlib import Path
 
 import requests
 from PIL import Image
+
+# ─────────────────────────────────────────────────────────────
+# SECTION 3: Load environment variables from .env file
+# ─────────────────────────────────────────────────────────────
+
+def _load_env_file():
+    env_file = ".env"
+    if os.path.exists(env_file):
+        with open(env_file, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" in line:
+                    key, val = line.split("=", 1)
+                    os.environ[key.strip()] = val.strip()
+
+_load_env_file()
+
+# ─────────────────────────────────────────────────────────────
+# SECTION 4: Configuration
+# ─────────────────────────────────────────────────────────────
+
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "YOUR_CHAT_ID")
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "YOUR_ANTHROPIC_API_KEY")
+
+MAX_TASK_STEPS = 20
+HEADLESS_BROWSER = False
+TYPING_MIN = 0.04
+TYPING_MAX = 0.13
+MOUSE_MIN = 0.25
+MOUSE_MAX = 0.75
+POLL_INTERVAL = 1
+LOG_FILE = "agent.log"
+ACTIVITY_LOG_FILE = "activity_log.json"
+MEMORY_FILE = "agent_memory.json"
+TEMPLATES_DIR = "templates"
 
 HAS_MSS = False
 try:
@@ -102,25 +120,7 @@ except ImportError:
     pass
 
 # ─────────────────────────────────────────────────────────────
-# SECTION 3b: Load environment variables from .env file
-# ─────────────────────────────────────────────────────────────
-
-def _load_env_file():
-    env_file = ".env"
-    if os.path.exists(env_file):
-        with open(env_file, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                if "=" in line:
-                    key, val = line.split("=", 1)
-                    os.environ[key.strip()] = val.strip()
-
-_load_env_file()
-
-# ─────────────────────────────────────────────────────────────
-# SECTION 4: Logging setup
+# SECTION 5: Logging setup
 # ─────────────────────────────────────────────────────────────
 
 logger = logging.getLogger("agent")
