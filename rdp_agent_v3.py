@@ -24,9 +24,9 @@ Requirements: Python 3.10+, see requirements.txt
 # SECTION 2: Configuration
 # ─────────────────────────────────────────────────────────────
 
-TELEGRAM_BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
-TELEGRAM_CHAT_ID = "YOUR_CHAT_ID"
-ANTHROPIC_API_KEY = "YOUR_ANTHROPIC_API_KEY"
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "YOUR_CHAT_ID")
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "YOUR_ANTHROPIC_API_KEY")
 
 MAX_TASK_STEPS = 20
 HEADLESS_BROWSER = False
@@ -100,6 +100,24 @@ try:
     HAS_PYTESSERACT = True
 except ImportError:
     pass
+
+# ─────────────────────────────────────────────────────────────
+# SECTION 3b: Load environment variables from .env file
+# ─────────────────────────────────────────────────────────────
+
+def _load_env_file():
+    env_file = ".env"
+    if os.path.exists(env_file):
+        with open(env_file, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" in line:
+                    key, val = line.split("=", 1)
+                    os.environ[key.strip()] = val.strip()
+
+_load_env_file()
 
 # ─────────────────────────────────────────────────────────────
 # SECTION 4: Logging setup
