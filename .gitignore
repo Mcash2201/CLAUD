@@ -5,3 +5,5 @@ activity_log.json
 agent_memory.json
 .env
 .env.local
+*.exe
+*.zip

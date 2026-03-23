@@ -42,7 +42,13 @@ import time
 from pathlib import Path
 
 import requests
-from PIL import Image
+
+HAS_PIL = False
+try:
+    from PIL import Image
+    HAS_PIL = True
+except ImportError:
+    pass
 
 # ─────────────────────────────────────────────────────────────
 # SECTION 3: Load environment variables from .env file
@@ -318,8 +324,22 @@ class TelegramBot:
 # SECTION 11: Screenshot engine
 # ─────────────────────────────────────────────────────────────
 
+def _make_fallback_png():
+    """Generate a minimal 1x1 black PNG without PIL."""
+    import struct
+    import zlib as _zlib
+    raw = b'\x00\x00\x00\x00'  # filter byte + 1 black RGB pixel
+    cdata = _zlib.compress(raw)
+    def _chunk(t, d):
+        c = _zlib.crc32(t + d) & 0xffffffff
+        return struct.pack('>I', len(d)) + t + d + struct.pack('>I', c)
+    return (b'\x89PNG\r\n\x1a\n'
+            + _chunk(b'IHDR', struct.pack('>IIBBBBB', 1, 1, 8, 2, 0, 0, 0))
+            + _chunk(b'IDAT', cdata)
+            + _chunk(b'IEND', b''))
+
 def take_screenshot():
-    if HAS_MSS:
+    if HAS_MSS and HAS_PIL:
         with mss.mss() as sct:
             monitor = sct.monitors[0]
             shot = sct.grab(monitor)
@@ -332,20 +352,24 @@ def take_screenshot():
         buf = io.BytesIO()
         img.save(buf, format="PNG", optimize=True)
         return buf.getvalue()
-    img = Image.new("RGB", (1920, 1080), (30, 30, 30))
-    buf = io.BytesIO()
-    img.save(buf, format="PNG", optimize=True)
-    return buf.getvalue()
+    if HAS_PIL:
+        img = Image.new("RGB", (1920, 1080), (30, 30, 30))
+        buf = io.BytesIO()
+        img.save(buf, format="PNG", optimize=True)
+        return buf.getvalue()
+    return _make_fallback_png()
 
 def take_screenshot_pil():
-    if HAS_MSS:
+    if HAS_MSS and HAS_PIL:
         with mss.mss() as sct:
             monitor = sct.monitors[0]
             shot = sct.grab(monitor)
             return Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
     if HAS_PYAUTOGUI:
         return pyautogui.screenshot()
-    return Image.new("RGB", (1920, 1080), (30, 30, 30))
+    if HAS_PIL:
+        return Image.new("RGB", (1920, 1080), (30, 30, 30))
+    return None
 
 def screenshot_to_base64():
     return base64.b64encode(take_screenshot()).decode("utf-8")
