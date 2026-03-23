@@ -3,6 +3,8 @@ __pycache__/
 agent.log
 activity_log.json
 agent_memory.json
+agent_profile.json
+orders.json
 .env
 .env.local
 *.exe

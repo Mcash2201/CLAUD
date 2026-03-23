@@ -688,6 +688,264 @@ async def close_browser():
     logger.info("Browser closed")
 
 # ─────────────────────────────────────────────────────────────
+# SECTION 23: Enhanced browser actions
+# ─────────────────────────────────────────────────────────────
+
+async def browser_fill(selector, text):
+    """Fill a form input by CSS selector."""
+    page = await get_page()
+    try:
+        await page.fill(selector, text)
+        log_activity("browser_fill", f"{selector[:40]}={text[:20]}")
+    except Exception as exc:
+        logger.warning("browser_fill error: %s", exc)
+
+async def browser_select(selector, value):
+    """Select a dropdown option by CSS selector (tries value then label)."""
+    page = await get_page()
+    try:
+        await page.select_option(selector, value=value)
+    except Exception:
+        try:
+            await page.select_option(selector, label=value)
+        except Exception as exc:
+            logger.warning("browser_select error: %s", exc)
+
+async def browser_wait_selector(selector, timeout=15000):
+    """Wait for an element to appear; returns True/False."""
+    page = await get_page()
+    try:
+        await page.wait_for_selector(selector, timeout=timeout)
+        return True
+    except Exception:
+        return False
+
+async def browser_get_text(selector):
+    """Return trimmed text content of the first element matching selector."""
+    page = await get_page()
+    try:
+        el = await page.query_selector(selector)
+        if el:
+            return (await el.text_content() or "").strip()
+    except Exception as exc:
+        logger.warning("browser_get_text error: %s", exc)
+    return ""
+
+async def browser_page_text():
+    """Return all visible text from the current page."""
+    page = await get_page()
+    try:
+        return await page.evaluate("() => document.body.innerText")
+    except Exception:
+        return ""
+
+async def browser_screenshot_only():
+    """Screenshot of browser viewport only (no desktop chrome)."""
+    page = await get_page()
+    try:
+        return await page.screenshot(type="png")
+    except Exception:
+        return take_screenshot()
+
+# ─────────────────────────────────────────────────────────────
+# SECTION 24: Profile & Autofill
+# ─────────────────────────────────────────────────────────────
+
+PROFILE_FILE = "agent_profile.json"
+
+PROFILE_FIELDS = [
+    "first_name", "last_name", "email", "phone",
+    "address1", "address2", "city", "state", "postcode", "country",
+    "card_name", "card_number", "card_expiry", "card_cvv",
+]
+
+def _profile_load():
+    if os.path.exists(PROFILE_FILE):
+        with open(PROFILE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+def _profile_save(data):
+    with open(PROFILE_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+
+def profile_set(field, value):
+    data = _profile_load()
+    data[field] = value
+    _profile_save(data)
+    logger.info("Profile set: %s", field)
+
+def profile_show():
+    data = _profile_load()
+    if not data:
+        return "Profile empty.\nUse: `/profile set first_name John`\nFields: " + ", ".join(PROFILE_FIELDS)
+    lines = ["*Profile:*"]
+    _mask = {"card_number", "card_cvv"}
+    for k, v in data.items():
+        v_str = str(v)
+        display = f"****{v_str[-4:]}" if k in _mask and len(v_str) >= 4 else v_str
+        lines.append(f"  `{k}`: {display}")
+    return "\n".join(lines)
+
+# autocomplete attribute value → profile key (None = full name)
+_AC_MAP = {
+    "given-name": "first_name", "family-name": "last_name", "name": None,
+    "email": "email", "tel": "phone",
+    "street-address": "address1", "address-line1": "address1",
+    "address-line2": "address2", "city": "city",
+    "state": "state", "postal-code": "postcode",
+    "country": "country", "country-name": "country",
+    "cc-name": "card_name", "cc-number": "card_number",
+    "cc-exp": "card_expiry", "cc-csc": "card_cvv",
+}
+
+# heuristic name/id token → profile key
+_FIELD_HINTS = [
+    ({"firstname", "first_name", "fname", "givenname"}, "first_name"),
+    ({"lastname", "last_name", "lname", "surname", "familyname"}, "last_name"),
+    ({"email", "emailaddress", "emailaddr"}, "email"),
+    ({"phone", "telephone", "tel", "mobile", "phonenumber", "cellphone"}, "phone"),
+    ({"address1", "address_1", "addressline1", "streetaddress", "street", "addr1"}, "address1"),
+    ({"address2", "address_2", "addressline2", "apt", "apartment", "suite", "addr2"}, "address2"),
+    ({"city", "town"}, "city"),
+    ({"state", "county", "province", "region"}, "state"),
+    ({"zip", "zipcode", "postcode", "postalcode", "postal"}, "postcode"),
+    ({"country", "countrycode", "countryname"}, "country"),
+    ({"cardname", "nameoncard", "cardholdername", "ccname", "nameoncc"}, "card_name"),
+    ({"cardnumber", "ccnumber", "cardno", "creditcard", "debitcard", "ccnum"}, "card_number"),
+    ({"expiry", "expdate", "expirydate", "ccexp", "expiration", "cardexpiry"}, "card_expiry"),
+    ({"cvv", "cvc", "csc", "securitycode", "cvv2", "cardcode"}, "card_cvv"),
+]
+
+async def browser_autofill():
+    """Auto-detect and fill visible form inputs using stored profile data."""
+    page = await get_page()
+    profile = _profile_load()
+    if not profile:
+        return "Profile is empty. Set fields first:\n`/profile set first_name John`"
+
+    full_name = f"{profile.get('first_name', '')} {profile.get('last_name', '')}".strip()
+    filled = []
+
+    inputs = await page.query_selector_all(
+        "input:not([type=hidden]):not([type=submit]):not([type=button])"
+        ":not([type=checkbox]):not([type=radio]):not([type=file])"
+    )
+
+    for inp in inputs:
+        try:
+            if not await inp.is_visible():
+                continue
+            ac = (await inp.get_attribute("autocomplete") or "").lower().strip()
+            raw_name = (await inp.get_attribute("name") or "").lower()
+            raw_id = (await inp.get_attribute("id") or "").lower()
+
+            value = None
+
+            # 1. autocomplete attribute (most reliable)
+            if ac in _AC_MAP:
+                key = _AC_MAP[ac]
+                value = full_name if key is None else profile.get(key, "")
+
+            # 2. heuristic name/id matching
+            if not value:
+                token = re.sub(r"[-_\s]", "", raw_name or raw_id)
+                for keywords, key in _FIELD_HINTS:
+                    if token in keywords:
+                        value = profile.get(key, "")
+                        break
+
+            if value:
+                await inp.fill(str(value))
+                label = raw_name or raw_id or "field"
+                sensitive = any(k in label for k in ("card", "cvv", "cvc", "csc", "cc"))
+                display = "****" if sensitive else str(value)[:30]
+                filled.append(f"`{label}` = {display}")
+                await asyncio.sleep(random.uniform(0.07, 0.18))
+
+        except Exception as exc:
+            logger.debug("Autofill field error: %s", exc)
+
+    if filled:
+        log_activity("autofill", f"{len(filled)} fields filled")
+        return f"Filled {len(filled)} field(s):\n" + "\n".join(filled)
+    return "No matching form fields found on this page."
+
+# ─────────────────────────────────────────────────────────────
+# SECTION 25: Order Tracker
+# ─────────────────────────────────────────────────────────────
+
+ORDERS_FILE = "orders.json"
+
+_ORDER_STATUSES = [
+    "ordered", "processing", "shipped", "out_for_delivery",
+    "delivered", "cancelled", "returned",
+]
+_STATUS_EMOJI = {
+    "ordered": "🛒", "processing": "⚙️", "shipped": "📦",
+    "out_for_delivery": "🚚", "delivered": "✅",
+    "cancelled": "❌", "returned": "↩️",
+}
+
+def _orders_load():
+    if os.path.exists(ORDERS_FILE):
+        with open(ORDERS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return []
+
+def _orders_save(orders):
+    with open(ORDERS_FILE, "w", encoding="utf-8") as f:
+        json.dump(orders, f, indent=2)
+
+def order_add(store, order_number, total="", items="", url="", notes=""):
+    orders = _orders_load()
+    oid = max((o["id"] for o in orders), default=0) + 1
+    orders.append({
+        "id": oid, "store": store, "order_number": order_number,
+        "total": total, "items": items, "url": url, "notes": notes,
+        "status": "ordered",
+        "date": datetime.datetime.now().isoformat()[:10],
+        "updated": datetime.datetime.now().isoformat()[:19],
+    })
+    _orders_save(orders)
+    logger.info("Order #%d added: %s %s", oid, store, order_number)
+    return oid
+
+def order_update_status(order_id, new_status):
+    orders = _orders_load()
+    for o in orders:
+        if o["id"] == order_id:
+            o["status"] = new_status
+            o["updated"] = datetime.datetime.now().isoformat()[:19]
+            _orders_save(orders)
+            return True
+    return False
+
+def order_list():
+    orders = _orders_load()
+    if not orders:
+        return "No orders tracked yet.\nUse: `/order add Amazon B123 £29.99`"
+    lines = [f"*Orders ({len(orders)}):*"]
+    for o in reversed(orders[-20:]):
+        emoji = _STATUS_EMOJI.get(o["status"], "📋")
+        total = f" | {o['total']}" if o.get("total") else ""
+        lines.append(
+            f"{emoji} *#{o['id']}* {o['store']} `{o['order_number']}`"
+            f"{total} — {o['status']} ({o['date']})"
+        )
+    return "\n".join(lines)
+
+def order_detail(order_id):
+    for o in _orders_load():
+        if o["id"] == order_id:
+            lines = [f"*Order #{order_id} — {_STATUS_EMOJI.get(o['status'], '')} {o['status']}*"]
+            for k, v in o.items():
+                if v and k != "id":
+                    lines.append(f"  `{k}`: {v}")
+            return "\n".join(lines)
+    return f"Order #{order_id} not found."
+
+# ─────────────────────────────────────────────────────────────
 # SECTION 18: Claude Vision AI brain
 # ─────────────────────────────────────────────────────────────
 
@@ -719,7 +977,7 @@ Respond ONLY with valid JSON (no markdown fences, no extra text).
 
 JSON schema:
 {{
-  "action": "click|double_click|right_click|type|scroll|key|drag|navigate|browser_navigate|browser_click|browser_type|browser_scroll|ocr_read|wait|done",
+  "action": "click|double_click|right_click|type|scroll|key|drag|navigate|browser_navigate|browser_click|browser_type|browser_scroll|browser_fill|browser_select|browser_wait_selector|autofill_page|ocr_read|wait|done",
   "x": 0,
   "y": 0,
   "x2": 0,
@@ -727,12 +985,20 @@ JSON schema:
   "text": "",
   "url": "",
   "key": "",
+  "selector": "",
+  "value": "",
   "direction": "up|down",
   "amount": 3,
   "memory_save": {{"key": "", "value": ""}},
   "reasoning": "what you see and why you chose this action",
   "status": "short user-facing status"
 }}
+
+Action notes:
+- browser_fill: fill an input by CSS selector (selector field required, text field for value)
+- browser_select: choose dropdown option (selector + value fields)
+- browser_wait_selector: pause until element appears (selector field)
+- autofill_page: auto-fill all visible form fields from stored profile
 """
 
     try:
@@ -795,6 +1061,8 @@ async def execute_action(decision, bot, chat_id):
     text = decision.get("text", "")
     url = decision.get("url", "")
     key = decision.get("key", "")
+    selector = decision.get("selector", "")
+    value = decision.get("value", "")
     direction = decision.get("direction", "down")
     amount = decision.get("amount", 3)
 
@@ -828,6 +1096,17 @@ async def execute_action(decision, bot, chat_id):
         await browser_type(text)
     elif action == "browser_scroll":
         await browser_scroll(direction, amount * 100)
+    elif action == "browser_fill":
+        await browser_fill(selector, text)
+    elif action == "browser_select":
+        await browser_select(selector, value)
+    elif action == "browser_wait_selector":
+        found = await browser_wait_selector(selector)
+        if not found:
+            bot.send_message(chat_id, f"Element `{selector}` did not appear.")
+    elif action == "autofill_page":
+        result = await browser_autofill()
+        bot.send_message(chat_id, result)
     elif action == "ocr_read":
         ocr_text = ocr_full_screen()
         chunks = [ocr_text[i:i + 3500] for i in range(0, len(ocr_text), 3500)]
@@ -909,17 +1188,34 @@ async def route_command(bot, chat_id, text, update):
         help_text = (
             "*Local Automation Agent v3*\n\n"
             "Send any text instruction to start a task.\n\n"
-            "*Commands:*\n"
-            "/shot — Take screenshot\n"
+            "*Browser:*\n"
+            "/shot — Screenshot\n"
             "/read — OCR full screen\n"
             "/close — Close browser\n"
-            "/status — Agent status\n"
-            "/queue <task> — Add task to queue\n"
+            "/pagetext — Get all page text\n"
+            "/autofill — Fill page form from profile\n"
+            "/fill <sel> <text> — Fill input by CSS selector\n"
+            "/select <sel> <val> — Pick dropdown option\n\n"
+            "*Profile (for autofill):*\n"
+            "/profile — Show stored profile\n"
+            "/profile set <field> <value> — Set a field\n"
+            "/profile fields — List all field names\n\n"
+            "*Orders:*\n"
+            "/orders — List all orders\n"
+            "/order add <store> <#> [total] — Track new order\n"
+            "/order update <id> <status> — Update status\n"
+            "/order info <id> — Order details\n"
+            "/order statuses — Valid status values\n\n"
+            "*Tasks & Queue:*\n"
+            "/queue <task> — Add to queue\n"
             "/queued — Show queue\n"
-            "/clearqueue — Clear queue\n"
+            "/clearqueue — Clear queue\n\n"
+            "*Schedules:*\n"
             "/schedule <args> — Schedule a task\n"
             "/schedules — List schedules\n"
-            "/unschedule <n> — Cancel schedule\n"
+            "/unschedule <n> — Cancel schedule\n\n"
+            "*Memory & Logs:*\n"
+            "/status — Agent status\n"
             "/memory — Show memory\n"
             "/forget <key> — Delete memory key\n"
             "/log [n] — Show recent activity\n"
@@ -1047,6 +1343,112 @@ async def route_command(bot, chat_id, text, update):
             bot.send_message(chat_id, "\n".join(lines))
         else:
             bot.send_message(chat_id, "No activity log yet.")
+        return
+
+    # ── Profile commands ──────────────────────────────────────
+    if low == "/profile":
+        bot.send_message(chat_id, profile_show())
+        return
+
+    if low == "/profile fields":
+        bot.send_message(chat_id, "Available profile fields:\n" + "\n".join(f"  `{f}`" for f in PROFILE_FIELDS))
+        return
+
+    if low.startswith("/profile set "):
+        parts = cmd[13:].strip().split(None, 1)
+        if len(parts) == 2:
+            field, val = parts
+            if field in PROFILE_FIELDS:
+                profile_set(field, val)
+                mask = {"card_number", "card_cvv"}
+                display = f"****{val[-4:]}" if field in mask and len(val) >= 4 else val
+                bot.send_message(chat_id, f"Profile updated: `{field}` = {display}")
+            else:
+                bot.send_message(chat_id, f"Unknown field `{field}`.\nValid fields: {', '.join(PROFILE_FIELDS)}")
+        else:
+            bot.send_message(chat_id, "Usage: `/profile set <field> <value>`")
+        return
+
+    if low == "/autofill":
+        result = await browser_autofill()
+        bot.send_message(chat_id, result)
+        return
+
+    if low == "/pagetext":
+        txt = await browser_page_text()
+        if not txt:
+            bot.send_message(chat_id, "No page text (is browser open?)")
+        else:
+            chunks = [txt[i:i + 3500] for i in range(0, len(txt), 3500)]
+            for chunk in chunks:
+                bot.send_message(chat_id, f"```\n{chunk}\n```")
+        return
+
+    if low.startswith("/fill "):
+        parts = cmd[6:].strip().split(None, 1)
+        if len(parts) == 2:
+            sel, fill_text = parts
+            await browser_fill(sel, fill_text)
+            bot.send_message(chat_id, f"Filled `{sel}`")
+        else:
+            bot.send_message(chat_id, "Usage: `/fill <selector> <text>`")
+        return
+
+    if low.startswith("/select "):
+        parts = cmd[8:].strip().split(None, 1)
+        if len(parts) == 2:
+            sel, val = parts
+            await browser_select(sel, val)
+            bot.send_message(chat_id, f"Selected `{val}` in `{sel}`")
+        else:
+            bot.send_message(chat_id, "Usage: `/select <selector> <value>`")
+        return
+
+    # ── Order commands ────────────────────────────────────────
+    if low == "/orders":
+        bot.send_message(chat_id, order_list())
+        return
+
+    if low == "/order statuses":
+        bot.send_message(chat_id, "Valid statuses:\n" + "\n".join(
+            f"  {_STATUS_EMOJI.get(s, '')} `{s}`" for s in _ORDER_STATUSES))
+        return
+
+    if low.startswith("/order add "):
+        parts = cmd[11:].strip().split(None, 2)
+        if len(parts) >= 2:
+            store, order_num = parts[0], parts[1]
+            total = parts[2] if len(parts) > 2 else ""
+            oid = order_add(store, order_num, total=total)
+            bot.send_message(chat_id, f"Order #{oid} added.\n{order_detail(oid)}")
+        else:
+            bot.send_message(chat_id, "Usage: `/order add <store> <order#> [total]`")
+        return
+
+    if low.startswith("/order update "):
+        parts = cmd[14:].strip().split(None, 1)
+        if len(parts) == 2:
+            try:
+                oid = int(parts[0])
+                status = parts[1].lower().strip()
+                if status not in _ORDER_STATUSES:
+                    bot.send_message(chat_id, f"Invalid status. Use: {', '.join(_ORDER_STATUSES)}")
+                elif order_update_status(oid, status):
+                    bot.send_message(chat_id, f"Order #{oid} → {_STATUS_EMOJI.get(status,'')} {status}")
+                else:
+                    bot.send_message(chat_id, f"Order #{oid} not found.")
+            except ValueError:
+                bot.send_message(chat_id, "Usage: `/order update <id> <status>`")
+        else:
+            bot.send_message(chat_id, "Usage: `/order update <id> <status>`")
+        return
+
+    if low.startswith("/order info "):
+        try:
+            oid = int(cmd[12:].strip())
+            bot.send_message(chat_id, order_detail(oid))
+        except ValueError:
+            bot.send_message(chat_id, "Usage: `/order info <id>`")
         return
 
     # Voice message handling
